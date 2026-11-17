@@ -1,0 +1,5 @@
+install.packages("pak")
+pak::pkg_install("Seurat")
+pak::pkg_install("tidyverse")
+pak::pkg_install("hdf5r")
+pak::pkg_install("arrow")

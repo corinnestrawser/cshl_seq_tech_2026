@@ -1,0 +1,1 @@
+rsync -av /igm/home/cnh008/projects/cshl/data/min_data r1pl-hpcf-log01:/home/gdmillerlab/cnh008/cshl/data

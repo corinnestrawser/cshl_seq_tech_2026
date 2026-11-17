@@ -1,0 +1,292 @@
+---
+title: "Instructor Key: Visium HD Demo (Bins vs Cells in Acute Hepatitis C)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup-knitr, include = FALSE}
+# Show code but do not run it when this key is knitted (it is a reference document)
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE, message = FALSE, warning = FALSE)
+```
+
+This key goes with `visHD_demo.rmd`. 
+
+**How the hour is built.**
+
+1. Students run the Seurat workflow live on raw 16 µm bins: QC, normalize, cluster, markers, annotation.
+2. They compare signal and contamination between bins and segmented cells.
+3. They load RCTD deconvolution results that you precomputed.
+4. They call lymphoid aggregates two ways: from bins (high lymphoid proportion) and from cells (dense groups of immune cells, found with DBSCAN), then compare the two calls. The cells reveal T cell, NK cell and dendritic cell aggregates with few B cells and no follicle: lymphoid aggregates, not mature TLSs.
+5. DEG and GSEA on T cells inside vs outside show how hepatocyte contamination creates false genes and pathways.
+
+# Before class
+
+- [ ] Install on the class machines, in a fresh R session, in this order: SeuratObject, then Seurat, then ggplot2, dplyr, patchwork, dbscan, presto, fgsea, msigdbr (recent msigdbr versions also need `msigdbdf`). Then check `"coords_x_orientation" %in% slotNames("VisiumV2")` returns `TRUE`. If it is `FALSE`, Seurat was installed against an older SeuratObject; reinstall Seurat.
+- [ ] Put the expected `packageVersion()` values in the handout's Setup so students can spot mismatches.
+- [ ] On your machine only: install `spacexr` for RCTD, and get a human liver scRNA-seq reference with immune subtypes (T, B, NK, dendritic cells, plasma cells) and a `celltype` column.
+- [ ] Prepare and save the two student objects (next section). The 16 µm object must be **raw**: counts only, unfiltered, unnormalized.
+- [ ] Run RCTD (step 5) and save the weights. Use the same `UMI_min` as the handout's `min_counts`.
+- [ ] Fill in the label lists in the handout's Setup, `lymph_cols` in Part 3 (as `make.names()` versions of the reference cell type names, for example `T.cells`), and `min_counts` in Part 1a.
+- [ ] Run the whole handout. Fill in `cluster_names` in 1c to match your clusters (keep it as a template for students), and tune the aggregate parameters in 4b and 4c so both calls find sensible aggregates. Save the backups at each `Backup:` line.
+- [ ] Time it. Part 1 is the slowest; if `FindAllMarkers` takes more than ~2 minutes, crop smaller.
+- [ ] Fill in the dry-run table.
+
+| Measurement                                         | Handout step | Your value                          |
+|:----------------------------------------------------|:-------------|:------------------------------------|
+| Bins removed by QC (and where)                      | 1a           |                                     |
+| Number of clusters; immune cluster number           | 1b, 1c       |                                     |
+| Median counts per bin / per cell                    | 2a           |                                     |
+| Median counts, hepatocytes vs T cells               | 2b           |                                     |
+| Median % hepatocyte genes in T cells                | 2c           |                                     |
+| Aggregates from bins / from cells                   | 4b, 4c       |                                     |
+| Overlap of cell aggregates with bin aggregates      | 4d           |                                     |
+| Composition of cell aggregates                      | 4e           | mostly T, NK, DC; few B (earlier analysis) |
+| FDC / GC positive, in aggregates vs outside         | 4e           | no enrichment (earlier analysis)    |
+| T cells inside / outside                            | 5a           |                                     |
+| Pathways lost after cleaning                        | 5b           |                                     |
+
+Table: Dry-run numbers.
+
+# Preparing the data
+
+## 1. Load
+
+```{r prep-load}
+# Load packages
+library(Seurat)      # spatial analysis
+library(ggplot2)   # plotting and convenience functions
+
+# Set path variable
+path <- "/home/gdmillerlab/cnh008/cshl/data/min_data/raw"
+
+# 16 um bins from the Space Ranger output
+obj16 <- Load10X_Spatial(path, bin.size = 16)
+
+# Load the segmented-cell object
+objCell <- Load10X_Spatial(path, bin.size = "polygons")
+
+# read in normalized deconvolution weights for cells
+cell_norm_weights <- readRDS("/igm/home/cnh008/projects/cshl/output/rdata/Spatial.Polygons_norm_weights_output.rds")
+
+# Add normalized weights to objCell
+objCell <- AddMetaData(objCell, cell_norm_weights)
+objCell$cell_type <- objCell$cell_type_Spatial.Polygons
+```
+
+## 2. Choose the region
+
+Choose a region with the immune aggregates plus surrounding lobule (roughly 2–3 mm across). Smaller crops make Part 1 faster.
+
+```{r prep-region}
+# Normalize a copy so genes can be plotted
+tmp <- NormalizeData(obj16)
+
+# Bin coordinates, plus whether an immune gene is detected
+xy <- GetTissueCoordinates(tmp)                                          # x, y, cell
+xy$immune <- rowSums(FetchData(tmp, c("CCR7", "CD3E"))[xy$cell, ]) > 0   # TRUE if either is detected
+
+# Plot with readable axes and read off an x/y box around the immune clusters
+ggplot(xy, aes(x, y, colour = immune)) +                     # position and color
+  geom_point(size = 0.3) +                                   # one dot per bin
+  scale_colour_manual(values = c("grey85", "red")) +         # immune bins in red
+  coord_fixed() +                                            # equal x and y scale
+  scale_x_continuous(n.breaks = 20) +                        # many x ticks
+  scale_y_continuous(n.breaks = 20) +                        # many y ticks
+  theme_bw() + theme(axis.text.x = element_text(angle = 90)) # readable ticks
+```
+
+## 3. Crop both objects with the same box
+
+```{r prep-crop}
+# The box (edit these)
+xlim <- c(7000, 19000)    # x range in pixels
+ylim <- c(32500, 42800)   # y range in pixels
+
+# Keep the cells/bins inside the box, using every image in the object
+crop <- function(obj, xlim, ylim) {
+  keep <- unlist(lapply(Images(obj), function(img) {                         # loop over images
+    xy <- as.data.frame(GetTissueCoordinates(obj, image = img))              # coordinates for this image
+    if (is.null(xy$cell)) xy$cell <- rownames(xy)                            # barcodes may be row names
+    if (anyDuplicated(xy$cell))                                              # outlines: many rows per cell
+      xy <- aggregate(cbind(x, y) ~ cell, data = xy, FUN = mean)             # average to one center
+    xy$cell[xy$x >= xlim[1] & xy$x <= xlim[2] &                              # inside the x range
+            xy$y >= ylim[1] & xy$y <= ylim[2]]                               # and the y range
+  }))
+  stopifnot(length(keep) > 0)                                                # stop if the box is empty
+  subset(obj, cells = keep)                                                  # keep those cells/bins
+}
+
+# 16 um: crop only and keep raw counts (students process it themselves)
+obj16s <- DietSeurat(crop(obj16, xlim, ylim), layers = "counts")
+
+# Cells: crop and normalize
+objCells <- NormalizeData(crop(objCell, xlim, ylim))
+
+# Sizes, and the count distribution for choosing min_counts
+c(bins = ncol(obj16s), cells = ncol(objCells))
+summary(obj16s$nCount_Spatial.016um)
+```
+
+If `DietSeurat()` drops the image in your Seurat version, skip it.
+
+## 4. Check that cells and bins line up, then save
+
+```{r prep-overlay}
+# Bin and cell coordinates (cell outlines averaged to centers)
+xyB <- GetTissueCoordinates(obj16s)
+xyC <- GetTissueCoordinates(objCells)
+if (anyDuplicated(xyC$cell)) xyC <- aggregate(cbind(x, y) ~ cell, data = xyC, FUN = mean)
+
+# Red cells should cover the same footprint as the grey bins, with matching gaps
+ggplot() +
+  geom_point(data = xyB, aes(x, y), size = 0.3, colour = "grey70") +   # bins
+  geom_point(data = xyC, aes(x, y), size = 0.1, colour = "red") +      # cells
+  coord_fixed()
+
+# Save where the handout expects them
+dir.create("data", showWarnings = FALSE)        # data folder
+saveRDS(obj16s,   "data/liver_16um.rds")        # 16 um bins, raw
+saveRDS(objCells, "data/liver_cells.rds")       # cells, normalized, with celltype
+```
+
+## 5. Run RCTD deconvolution
+
+This is the chunk shown (not run) in the handout's Part 3. Run it on the cropped 16 µm object. Expect it to take a long time: from tens of minutes to a few hours, depending on the number of bins and cores.
+
+```{r prep-rctd}
+# Package for RCTD
+library(spacexr)
+
+# Reference: a human liver scRNA-seq Seurat object with a celltype column.
+# RCTD needs at least ~25 cells per type; remove "/" from type names.
+ref <- readRDS("path/to/liver_reference.rds")
+
+# Reference inputs: raw counts, cell type per cell, counts per cell
+ref_counts <- LayerData(ref, assay = "RNA", layer = "counts")             # genes x cells
+ref_types  <- factor(setNames(ref$celltype, colnames(ref)))               # cell type per cell
+ref_nUMI   <- setNames(ref$nCount_RNA, colnames(ref))                     # counts per cell
+reference  <- Reference(ref_counts, ref_types, ref_nUMI)                  # RCTD reference
+
+# Query inputs: raw counts and positions of the cropped 16 um bins
+q_counts <- LayerData(obj16s, assay = "Spatial.016um", layer = "counts")  # genes x bins
+q_coords <- GetTissueCoordinates(obj16s)                                  # positions
+rownames(q_coords) <- q_coords$cell                                       # name rows by barcode
+q_coords <- q_coords[colnames(obj16s), c("x", "y")]                       # same order as the object
+query    <- SpatialRNA(q_coords, q_counts, colSums(q_counts))             # RCTD query
+
+# Run RCTD in "full" mode (any number of cell types per bin), keeping bins with
+# >= 50 counts so it matches min_counts in the handout
+rctd <- create.RCTD(query, reference, max_cores = 8, UMI_min = 50)        # set up
+rctd <- run.RCTD(rctd, doublet_mode = "full")                             # run
+
+# Proportions per bin (rows = barcodes, columns = cell types, rows sum to 1)
+weights <- as.data.frame(as.matrix(normalize_weights(rctd@results$weights)))
+
+# Check: lymphoid proportions should be high in the immune patches
+colnames(weights)                                                         # reference cell types
+summary(rowSums(weights))                                                 # should all be 1
+
+# Save for students
+saveRDS(weights, "data/precomputed/Spatial.016um_norm_weights_output.rds")
+```
+
+"Full" mode suits 16 µm bins, which often contain several cells. For 8 µm bins or near-single-cell data, RCTD's "doublet" mode is more common.
+
+## 6. Build the backups during your dry run
+
+```{r prep-backups}
+# Save every object and variable the later parts need
+save_state <- function(file) {
+  vars <- intersect(c("obj16", "objCell", "assay16", "assayCell",            # objects and assays
+                      "b_types", "t_types", "nk_types", "dc_types", "hep_types",  # label lists
+                      "cluster_markers", "cluster_names",                    # Part 1 results
+                      "weights", "lymph_cols",                               # Part 3 results
+                      "xy16", "spacing16", "um_per_px", "xyCell"),           # Part 4 positions
+                    ls(envir = .GlobalEnv))                                  # only those that exist
+  saveRDS(mget(vars, envir = .GlobalEnv), file)                              # save as a named list
+}
+
+# Make the folder once, then save at each Backup: line in the handout
+dir.create("data/backup", showWarnings = FALSE)
+save_state("data/backup/after_part1b.rds")   # after clustering
+save_state("data/backup/after_part1.rds")    # after annotation
+save_state("data/backup/after_part3.rds")    # after loading the deconvolution
+save_state("data/backup/after_part4.rds")    # after the aggregate calls
+```
+
+# Answers
+
+## Part 1
+
+**Q1.** At tissue edges, in vessel lumens and in tears: bins over little or no tissue capture few transcripts. This is the spatial version of removing empty droplets.
+
+**Q2.** Expect a cluster high in CYP2E1/GLUL (pericentral) and one high in HAL/SDS/CPS1 (periportal), alternating in a repeating lobular pattern. A small KRT19/KRT7 plus COL1A1/DCN cluster marks portal tracts.
+
+**Q3.** Neighboring bins share a microenvironment and often parts of the same cells, so they have similar expression and cluster together. Tissue structure is written into the expression.
+
+**Q4.** Expect a small cluster with CD3E, NKG7, CCR7 and LAMP3 forming compact patches, many near portal tracts. MS4A1 is likely weak, which foreshadows Part 4.
+
+## Part 2
+
+**Q5.** Record your ratio. A 16 µm bin (256 µm²) collects transcripts from a larger area than most cells, and from several small cells at once. Cells vary widely: hepatocytes have many counts, lymphocytes few.
+
+**Q6.** Bins are better for *detecting* a sparse signal, because they pool transcripts. Segmented cells are better for knowing *which cell* expressed it, although bleed-through means that is not certain either.
+
+**Q7.** Any two of: lateral diffusion of transcripts during capture; segmentation boundaries drawn too wide; overlapping cells within the section's thickness; ambient RNA from damaged hepatocytes, which are injured in hepatitis.
+
+## Part 3
+
+**Q8.** About 60% of the bin's transcripts are estimated to come from T cells. Physically, that is likely several small T cells plus part of a hepatocyte. It is a share of transcripts, not of cell number or area, and hepatocytes contribute many transcripts per cell.
+
+**Q9.** RCTD can only assign transcripts to cell types in the reference. Dendritic cell transcripts would be forced onto the closest available types (for example macrophages or T cells), which would inflate those estimates and hide the DCs.
+
+## Part 4
+
+**Q10.** Record your counts. Expect broad agreement on the large aggregates.
+
+**Q11.** Reasons for disagreement:
+
+- **Bins miss** small aggregates (under ~20 bins) and aggregates mixed with hepatocytes, where the lymphoid proportion stays below 0.5.
+- **Cells miss** aggregates where segmentation fails in densely packed lymphocytes, or where cells are mislabeled.
+- **The thresholds are arbitrary.** Each method has its own parameters.
+
+**Q12.** In the earlier analysis: mostly T cells, NK cells and dendritic cells, with few B cells and no FDC or germinal center enrichment. These are lymphoid aggregates, not TLSs. A TLS needs a B cell follicle, ideally with FDCs, and a germinal center for a mature TLS.
+
+**Q13.** Lowering the bin threshold (0.5 to 0.3) makes aggregates larger and more numerous. Raising `minPts` makes the cell call stricter, so fewer and smaller aggregates. Counts of "aggregates" depend on parameters, so report them, and check that conclusions hold across a reasonable range.
+
+## Part 5
+
+**Q14.** Record your top non-flagged genes. The pattern to look for: T cells in aggregates look more like T cell zone residents (CCR7, SELL, IL7R, TCF7); lobular T cells look more cytotoxic and activated (GZMB, GZMK, NKG7, IFNG, interferon-stimulated genes). Accept answers that read the actual lists.
+
+**Q15.** Expect hepatocyte programs (xenobiotic metabolism, bile acid metabolism, coagulation, fatty acid metabolism) on the "higher outside" end to weaken or disappear. Without cleaning, a student would conclude that lobular T cells "upregulate metabolic programs", an artifact of their neighbors.
+
+**Q16.** Cells from one section are not independent replicates: one patient, one biopsy, one run. Treating hundreds of cells as hundreds of samples makes small differences "significant". A trustworthy design uses several patients and a pseudobulk analysis (sum counts per patient × region, then test across patients with DESeq2 or edgeR).
+
+## Wrap-up
+
+**Q17.** (a) Lobule zones: 16 µm bins, clusters or zonation markers. (b) Counting aggregates in 100 biopsies: 16 µm bins with deconvolution, which is robust and fast. (c) Composition: segmented cells, keeping bleed-through and segmentation errors in mind.
+
+**Q18.** TLSs need a persistent stimulus and time: lymphotoxin signaling drives stromal cells to make CXCL13, CCL19 and CCL21, and FDC networks and germinal centers form over weeks. Early in infection the response is effector-dominated: T cells, NK cells and dendritic cells. In chronic HCV, portal lymphoid aggregates and follicles are common, can contain germinal centers, and are where B cell clones linked to mixed cryoglobulinemia and B cell lymphoma arise.
+
+# Troubleshooting
+
+| Problem                                                          | Likely cause                                    | Fix                                                                                  |
+|:-----------------------------------------------------------------|:------------------------------------------------|:-------------------------------------------------------------------------------------|
+| `invalid name for slot of class "VisiumV2": coords_x_orientation` | Seurat installed against an older SeuratObject  | Fresh R session: reinstall Seurat (from source if needed) after SeuratObject          |
+| `no slot of name "coords_x_orientation"` or misaligned H&E       | Object built with an older Seurat               | Rebuild the objects with the class Seurat version                                    |
+| `FindAllMarkers` / `FindMarkers` very slow                       | `presto` not installed                          | Install `presto`, or lower `max.cells.per.ident`                                     |
+| `cluster_names` gives NA for some clusters                       | Different number of clusters than the template  | Add a line for each missing cluster                                                  |
+| `undefined columns selected` in Part 3                           | `lymph_cols` don't match the weight columns     | Use the `make.names()` form of `colnames(weights)`, e.g. `T.cells`                   |
+| Many bins with all-zero proportions                              | RCTD skipped bins below its `UMI_min`           | Rerun RCTD with `UMI_min` equal to `min_counts`                                      |
+| No bin aggregates in 4b                                          | Threshold too strict for this region            | Lower `0.5` to `0.3`, or lower the minimum size from 20                              |
+| No cell aggregates in 4c                                         | Labels or parameters                            | Check the label lists; try `eps` 30 µm or `minPts = 3`                               |
+| `could not find function "dbscan"`                               | Package not installed or loaded                 | `install.packages("dbscan")`; `library(dbscan)`                                      |
+| Too few T cells inside aggregates for DE (under ~50)             | Small aggregates                                | Loosen 4c, or compare T and NK cells together                                        |
+| msigdbr error about missing data or `msigdbdf`                   | Recent msigdbr keeps gene sets in a separate package | Install `msigdbdf` before class, as the error says                              |
+| fgsea warning "There are ties in the preranked stats"            | Many genes share the same fold change           | Harmless                                                                             |
+| Student far behind                                               | Live steps take longer than planned             | `list2env(readRDS("data/backup/after_partX.rds"), envir = .GlobalEnv)`               |
+
+Table: Common problems.
