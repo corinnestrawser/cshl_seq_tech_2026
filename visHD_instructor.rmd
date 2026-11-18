@@ -59,6 +59,12 @@ Table: Dry-run numbers.
 library(Seurat)      # spatial analysis
 library(ggplot2)   # plotting and convenience functions
 
+# Load a color palette
+colors <- c("#0166d8", "#ec102f", "#3aa609", "#b775e1", "#f8d147", "#5ce8ef", 
+            "#fd6ca0","#476ba5", "#fea27a", "#add465", "#6524ff", "#fe8f06", 
+            "#5cfdc4", "#feafda","#00228b", "#fd5925", "#166d2a", "#a90aa1", 
+            "#f3c011", "#5ac7dc", "#c1c2f5")
+
 # Set path variable
 path <- "/home/gdmillerlab/cnh008/cshl/data/min_data/raw"
 
@@ -69,7 +75,7 @@ obj16 <- Load10X_Spatial(path, bin.size = 16)
 objCell <- Load10X_Spatial(path, bin.size = "polygons")
 
 # read in normalized deconvolution weights for cells
-cell_norm_weights <- readRDS("/igm/home/cnh008/projects/cshl/output/rdata/Spatial.Polygons_norm_weights_output.rds")
+cell_norm_weights <- readRDS("/home/gdmillerlab/cnh008/cshl/data/min_data/precomputed/Spatial.Polygons_norm_weights_output.rds")
 
 # Add normalized weights to objCell
 objCell <- AddMetaData(objCell, cell_norm_weights)
@@ -96,6 +102,8 @@ ggplot(xy, aes(x, y, colour = immune)) +                     # position and colo
   scale_x_continuous(n.breaks = 20) +                        # many x ticks
   scale_y_continuous(n.breaks = 20) +                        # many y ticks
   theme_bw() + theme(axis.text.x = element_text(angle = 90)) # readable ticks
+
+
 ```
 
 ## 3. Crop both objects with the same box
@@ -130,15 +138,12 @@ c(bins = ncol(obj16s), cells = ncol(objCells))
 summary(obj16s$nCount_Spatial.016um)
 ```
 
-If `DietSeurat()` drops the image in your Seurat version, skip it.
-
 ## 4. Check that cells and bins line up, then save
 
 ```{r prep-overlay}
 # Bin and cell coordinates (cell outlines averaged to centers)
 xyB <- GetTissueCoordinates(obj16s)
 xyC <- GetTissueCoordinates(objCells)
-if (anyDuplicated(xyC$cell)) xyC <- aggregate(cbind(x, y) ~ cell, data = xyC, FUN = mean)
 
 # Red cells should cover the same footprint as the grey bins, with matching gaps
 ggplot() +
@@ -187,10 +192,10 @@ weights <- as.data.frame(as.matrix(normalize_weights(rctd@results$weights)))
 
 # Check: lymphoid proportions should be high in the immune patches
 colnames(weights)                                                         # reference cell types
-summary(rowSums(weights))                                                 # should all be 1
+summary(rowSums(weights[,1:ncol(weights)-1]))                                                 # should all be 1
 
 # Save for students
-saveRDS(weights, "data/precomputed/Spatial.016um_norm_weights_output.rds")
+saveRDS(weights, "data/min_data/precomputed/Spatial.016um_norm_weights_output.rds")
 ```
 
 "Full" mode suits 16 µm bins, which often contain several cells. For 8 µm bins or near-single-cell data, RCTD's "doublet" mode is more common.
@@ -200,7 +205,7 @@ saveRDS(weights, "data/precomputed/Spatial.016um_norm_weights_output.rds")
 ```{r prep-backups}
 # Save every object and variable the later parts need
 save_state <- function(file) {
-  vars <- intersect(c("obj16", "objCell", "assay16", "assayCell",            # objects and assays
+  vars <- intersect(c("obj16", "objCell", "assay16", "assayCell","colors",          # objects and assays and colors
                       "b_types", "t_types", "nk_types", "dc_types", "hep_types",  # label lists
                       "cluster_markers", "cluster_names",                    # Part 1 results
                       "weights", "lymph_cols",                               # Part 3 results

@@ -51,8 +51,14 @@ library(patchwork)   # put plots side by side with |
 library(dbscan)      # finds dense groups of points (used to call aggregates)
 
 # Check versions
-packageVersion("Seurat")         # Seurat
-packageVersion("SeuratObject")   # SeuratObject (must match Seurat)
+packageVersion("Seurat")         # Seurat (6.0.0)
+packageVersion("SeuratObject")   # SeuratObject (5.4.0)
+
+# Load a color palette
+colors <- c("#0166d8", "#ec102f", "#3aa609", "#b775e1", "#f8d147", "#5ce8ef", 
+            "#fd6ca0","#476ba5", "#fea27a", "#add465", "#6524ff", "#fe8f06", 
+            "#5cfdc4", "#feafda","#00228b", "#fd5925", "#166d2a", "#a90aa1", 
+            "#f3c011", "#5ac7dc", "#c1c2f5")
 
 # Read in the two objects: the same tissue region at two resolutions
 obj16   <- readRDS("data/liver_16um.rds")   # 16 um bins (raw counts; you will process these)
@@ -71,26 +77,26 @@ obj16      # 16 um bins
 objCell    # segmented cells
 
 # How many cells of each type are in the segmented object?
-table(objCell$celltype)
+table(objCell$cell_type)
 ```
 
 Tell R which cell type labels belong to each group. 
 
 ```{r labels}
 # Every label in objCell$celltype that belongs to each group (edit if needed)
-b_types   <- c("B cells")                       # B cells
-t_types   <- c("CD4 T cells", "CD8 T cells")    # T cells
-nk_types  <- c("NK cells")                      # NK cells
-dc_types  <- c("Dendritic cells")               # dendritic cells
+b_types   <- c("B_cells")                       # B cells
+t_types   <- c("Alpha_Beta_T_cells")            # T cells
+nk_types  <- c("NK_cells")                      # NK cells
+dc_types  <- c("Dendritic_cells")               # dendritic cells
 hep_types <- c("Hepatocytes")                   # hepatocytes
 
 # A simpler label for each cell: B, T, NK, DC, hepatocyte or other
-objCell$lineage <- case_when(objCell$celltype %in% b_types   ~ "B",           # B cells
-                             objCell$celltype %in% t_types   ~ "T",           # T cells
-                             objCell$celltype %in% nk_types  ~ "NK",          # NK cells
-                             objCell$celltype %in% dc_types  ~ "DC",          # dendritic cells
-                             objCell$celltype %in% hep_types ~ "hepatocyte",  # hepatocytes
-                             TRUE                            ~ "other")       # everything else
+objCell$lineage <- case_when(objCell$cell_type %in% b_types   ~ "B",           # B cells
+                             objCell$cell_type %in% t_types   ~ "T",           # T cells
+                             objCell$cell_type %in% nk_types  ~ "NK",          # NK cells
+                             objCell$cell_type %in% dc_types  ~ "DC",          # dendritic cells
+                             objCell$cell_type %in% hep_types ~ "hepatocyte",  # hepatocytes
+                             TRUE                            ~ "other")        # everything else
 
 # How many cells in each group?
 table(objCell$lineage)
@@ -111,15 +117,15 @@ genes16  <- obj16[[paste0("nFeature_", assay16)]][, 1]   # genes detected per bi
 summary(counts16)   # spread of counts per bin
 summary(genes16)    # spread of genes per bin
 
-# Minimum counts a bin needs to be kept (your instructor may adjust this)
+# Minimum counts a bin needs to be kept
 min_counts <- 50
 
 # Mark bins below the threshold
 obj16$low_quality <- counts16 < min_counts
 
 # Where are they? Counts per bin (left) and the bins that will be removed (right)
-SpatialFeaturePlot(obj16, paste0("nCount_", assay16)) |   # counts on the tissue
-  SpatialDimPlot(obj16, group.by = "low_quality")          # TRUE = will be removed
+SpatialFeaturePlot(obj16, paste0("nCount_", assay16), pt.size.factor = 6) |   # counts on the tissue
+  SpatialDimPlot(obj16, group.by = "low_quality", pt.size.factor = 6)         # TRUE = will be removed
 
 # How many bins will be removed?
 table(obj16$low_quality)
@@ -142,17 +148,17 @@ obj16 <- FindVariableFeatures(obj16, nfeatures = 2000)
 # Scale each variable gene to mean 0, variance 1 (so high-expression genes don't dominate)
 obj16 <- ScaleData(obj16)
 
-# Principal component analysis: summarize the 2,000 genes as 10 components
-obj16 <- RunPCA(obj16, npcs = 10, verbose = FALSE)
+# Principal component analysis: summarize the 2,000 genes as 20 components
+obj16 <- RunPCA(obj16, npcs = 20)
 
 # How many components carry signal? Look for where the curve flattens
-ElbowPlot(obj16, ndims = 10)
+ElbowPlot(obj16, ndims = 20)
 
 # Build a nearest-neighbor graph of bins from the first 10 components
 obj16 <- FindNeighbors(obj16, dims = 1:10)
 
 # Find clusters of similar bins; higher resolution = more clusters
-obj16 <- FindClusters(obj16, resolution = 0.1, cluster.name = "clusters_16")
+obj16 <- FindClusters(obj16, resolution = 0.2, cluster.name = "clusters_16")
 
 # A 2-D map of the bins for viewing (UMAP)
 obj16 <- RunUMAP(obj16, dims = 1:10)
@@ -160,8 +166,8 @@ obj16 <- RunUMAP(obj16, dims = 1:10)
 
 ```{r cluster-plots, fig.width = 12, fig.height = 5}
 # Clusters on the UMAP (left) and on the tissue (right)
-DimPlot(obj16, group.by = "clusters_16", label = TRUE) |        # UMAP
-  SpatialDimPlot(obj16, group.by = "clusters_16", label = TRUE)  # tissue
+DimPlot(obj16, group.by = "clusters_16", label = TRUE, cols = colors) |                             # UMAP
+  SpatialDimPlot(obj16, group.by = "clusters_16", label = TRUE, pt.size.factor = 6, cols = colors)  # tissue
 ```
 
 **What you should see:** several clusters that form patterns on the tissue: alternating zones, small islands, and a few compact patches. The clustering never used the spot positions.
@@ -174,9 +180,8 @@ Backup: `list2env(readRDS("data/backup/after_part1b.rds"), envir = .GlobalEnv)`
 # For each cluster, genes higher in that cluster than in all others
 cluster_markers <- FindAllMarkers(obj16,
                                   only.pos = TRUE,             # only genes higher in the cluster
-                                  logfc.threshold = 0.5,       # at least ~1.4-fold higher
-                                  min.pct = 0.1,               # detected in >= 10% of the cluster
-                                  max.cells.per.ident = 500)   # up to 500 bins per cluster, for speed
+                                  logfc.threshold = 0.25,       # at least ~1.2-fold higher
+                                  min.pct = 0.1)               # detected in >= 10% of the cluster
 
 # Top 5 markers per cluster, by fold change
 cluster_markers %>%
@@ -198,31 +203,22 @@ known <- c("CYP2E1", "GLUL",           # pericentral hepatocytes (around central
            "MS4A1")                    # B cells
 
 # Dot size = % of bins expressing the gene; color = average expression
-DotPlot(obj16, features = known, group.by = "clusters_16") + RotatedAxis()
+DotPlot(obj16, features = known, group.by = "clusters_16") + RotatedAxis() + scale_color_continuous(type = "viridis")
 ```
 
 Name the clusters. Edit the names on the right to match what you see (add or remove lines to match your number of clusters).
 
 ```{r annotate}
 # A name for each cluster number
-cluster_names <- c("0" = "t cells",
-                   "1" = "fibroblasts + immune",
-                   "2" = "periportal hepatocytes",
-                   "10" = "periportal hepatocytes",
-                   "11" = "cholangiocytes",
-                   "13" = "T cells + denritic",
-                   "16" = "T cells + NK cells",
-                   "17" = "pericentral hepatocytes",
-                   "18" = "Kupffer cells",
-                   "19" = "LSECs",
-                   "20" = "LSECs",
-                   "21" = "fibroblasts")
+cluster_names <- c("1" = "periportal hepatocytes",
+                   "5" = "fibroblasts + immune",
+                   "13" = "pericentral hepatocytes")
 
 # Add the names as a metadata column (clusters without a name become NA)
 obj16$cluster_name <- unname(cluster_names[as.character(obj16$clusters_16)])
 
 # Named clusters on the tissue
-SpatialDimPlot(obj16, group.by = "cluster_name")
+SpatialDimPlot(obj16, group.by = "cluster_name", pt.size.factor = 6, cols = colors)
 ```
 
 Backup: `list2env(readRDS("data/backup/after_part1.rds"), envir = .GlobalEnv)`
@@ -231,7 +227,7 @@ Backup: `list2env(readRDS("data/backup/after_part1.rds"), envir = .GlobalEnv)`
 
 1. Where were the low-quality bins? Why is that expected?
 2. Which clusters are pericentral and periportal hepatocytes? Do they form a repeating pattern?
-3. The clustering never used positions, yet clusters form spatial patterns. Why?
+3. Louvain clustering never used positions, yet clusters form spatial patterns. Why?
 4. Is there an immune cluster? Which genes define it, and where does it sit?
 
 # Part 2: QC, bins vs cells (7 min)
@@ -270,7 +266,7 @@ ggplot(qc, aes(level, counts + 1)) +                     # x = resolution, y = c
 VlnPlot(objCell, paste0("nCount_", assayCell), group.by = "lineage", pt.size = 0, log = TRUE)
 ```
 
-**What you should see:** hepatocytes (20–30 µm across) have far more counts than lymphocytes (about 7 µm). A 16 µm bin holds part of one hepatocyte or several lymphocytes, so bins average over different numbers of cells in different places.
+**What you should see:** hepatocytes (20–30 µm across) have more counts than lymphocytes (about 7 µm). A 16 µm bin holds part of one hepatocyte or several lymphocytes, so bins average over different numbers of cells in different places.
 
 ## 2c. Contamination
 
@@ -324,14 +320,14 @@ rctd <- run.RCTD(rctd, doublet_mode = "full")                             # run
 
 # Proportions: each bin's weights rescaled to sum to 1
 weights <- as.data.frame(as.matrix(normalize_weights(rctd@results$weights)))
-saveRDS(weights, "data/rctd_weights_16um.rds")                            # save for students
+saveRDS(weights, "data/Spatial.016um_norm_weights_output.rds")            # save for students
 ```
 
 Load the saved result and add it to your object:
 
 ```{r rctd-load}
 # One row per bin (row names = barcodes), one column per reference cell type
-weights <- readRDS("data/precomputed/Spatial.016um_norm_weights_output.rds")
+weights <- readRDS("data/min_data/precomputed/Spatial.016um_norm_weights_output.rds")
 
 # The cell types in the reference
 colnames(weights)
@@ -340,19 +336,25 @@ colnames(weights)
 weights <- weights[colnames(obj16), ]
 
 # Bins that RCTD skipped have no estimate (NA); treat them as 0
-weights[is.na(weights)] <- 0
+weights[is.na(weights[])] <- 0
 
 # Add each cell type's proportion to the metadata (column names start with "prop_")
 obj16 <- AddMetaData(obj16, setNames(weights, paste0("prop_", make.names(colnames(weights)))))
 
-# Which reference cell types are lymphoid? (your instructor has filled these in)
-lymph_cols <- c("T.cells", "B.cells", "NK.cells", "Dendritic.cells")   # edit to match colnames
+# check that row names between weights and obj17 meta data line up
+all(rownames(obj16@meta.data) == rownames(weights)) # TRUE
+
+# Label each bin with the cell type that has the highest proportion
+obj16$annotation <- colnames(weights)[max.col(weights)]
+
+# Which reference cell types are in lymphoid aggregates? (your instructor has filled these in)
+lymph_cols <- c("Alpha_Beta_T_cells", "B_cells", "NK_cells", "Dendritic_cells", "Plasma_cells")
 
 # Total lymphoid proportion per bin
 obj16$prop_lymphoid <- rowSums(obj16@meta.data[, paste0("prop_", lymph_cols), drop = FALSE])
 
 # Map a few proportions on the tissue
-SpatialFeaturePlot(obj16, c("prop_lymphoid", paste0("prop_", lymph_cols[1:2])))
+SpatialFeaturePlot(obj16, c("prop_lymphoid", paste0("prop_", lymph_cols[1:2])), pt.size.factor = 6)
 ```
 
 **What you should see:** the lymphoid proportion is near 0 across most of the tissue and high in a few compact patches. Those patches overlap the immune cluster from Part 1.
@@ -366,7 +368,7 @@ Backup: `list2env(readRDS("data/backup/after_part3.rds"), envir = .GlobalEnv)`
 
 # Part 4: Calling lymphoid aggregates, bins vs cells (14 min)
 
-You will call aggregates two ways and compare them.
+We will call aggregates two ways and compare them.
 
 - **From bins:** groups of neighboring bins with a high lymphoid proportion.
 - **From cells:** groups of immune cells packed closely together.
@@ -392,19 +394,19 @@ um_per_px <- 16 / spacing16
 
 # Cell positions (some objects return outlines: average them to one center per cell)
 xyCell <- GetTissueCoordinates(objCell)                                                     # positions
-if (anyDuplicated(xyCell$cell)) xyCell <- aggregate(cbind(x, y) ~ cell, data = xyCell, FUN = mean)  # centers
 rownames(xyCell) <- xyCell$cell                                                             # name rows
-xyCell <- xyCell[colnames(objCell), c("x", "y")]                                            # same order as object
+all(colnames(objCell) == rownames(xyCell))                                                  # same order as object
+xyCell <- xyCell[colnames(objCell), c("x", "y")]                                            # rearrange if necessary
 ```
 
 ## 4b. Aggregates from bins
 
 ```{r agg-bins}
-# Bins where more than half the signal is lymphoid (your instructor may adjust this)
+# Bins where more than half the signal is lymphoid
 lymph_bin <- obj16$prop_lymphoid > 0.5
 
 # Group neighboring lymphoid bins: bins within 1.5 bin spacings are joined (minPts = 1
-# means every lymphoid bin can start a group)
+# means every lymphoid bin can start a group; eps = radius of the neighborhood around each pt)
 bin_groups <- dbscan(xy16[lymph_bin, ], eps = 1.5 * spacing16, minPts = 1)$cluster
 
 # Count bins per group and keep groups of at least 20 bins (about 5,000 um^2)
@@ -418,7 +420,7 @@ obj16$agg_bin[lymph_bin] <- ifelse(bin_groups %in% keep, paste0("B_", bin_groups
 table(obj16$agg_bin)
 
 # Show them on the tissue
-SpatialDimPlot(obj16, group.by = "agg_bin")
+SpatialDimPlot(obj16, group.by = "agg_bin", pt.size.factor = 6, cols = colors)
 ```
 
 ## 4c. Aggregates from cells
@@ -451,9 +453,13 @@ ggplot() +
   geom_point(data = xy16[!is.na(obj16$agg_bin), ], aes(x, y),                # bins in aggregates
              colour = "grey60", shape = 15, size = 1) +
   geom_point(data = cbind(xyCell, agg = objCell$agg_cell)[!is.na(objCell$agg_cell), ],  # cells in aggregates
-             aes(x, y, colour = agg), size = 0.4) +
-  coord_fixed() + scale_y_reverse() +                                        # undistorted, image orientation
+             aes(x, y, colour = agg), size = 0.4, alpha = 0.4) +
+  coord_fixed() + scale_y_reverse() + theme_bw() +                                # undistorted, image orientation
   labs(colour = "Cell aggregate", title = "Grey = bin aggregates; color = cell aggregates")
+
+# On tissue
+SpatialDimPlot(obj16, group.by = "agg_bin", pt.size.factor = 6, cols = colors) |
+  SpatialDimPlot(objCell, group.by = "agg_cell", plot_segmentations = T, cols = colors)
 
 # For each cell aggregate: what % of its cells sit inside a bin aggregate?
 agg_bin_xy <- xy16[!is.na(obj16$agg_bin), ]                                  # positions of aggregate bins
@@ -487,8 +493,8 @@ objCell@meta.data %>%
             pct_NK = round(100 * mean(lineage == "NK"), 1),  # % NK cells
             pct_DC = round(100 * mean(lineage == "DC"), 1))  # % dendritic cells
 
-# Is there a follicle? Cells with any count of FDC genes (CR2, FDCSP) or germinal
-# center genes (BCL6, AICDA), inside vs outside the cell aggregates
+# Is there a follicle? Cells with any count of follicular dendritic cells (FDC) genes (CR2, FDCSP) 
+# or germinal center genes (BCL6, AICDA), inside vs outside the cell aggregates
 counts <- LayerData(objCell, assay = assayCell, layer = "counts")              # raw counts
 any_count <- function(g) colSums(counts[intersect(g, rownames(counts)), , drop = FALSE]) > 0  # any count
 objCell$fdc_pos <- any_count(c("CR2", "FDCSP"))                                # FDC genes
@@ -535,8 +541,7 @@ de <- FindMarkers(tcells,
                   ident.1 = "inside",            # group 1
                   ident.2 = "outside",           # group 2
                   logfc.threshold = 0,           # keep every gene: GSEA needs the full list
-                  min.pct = 0.05,                # genes detected in >= 5% of either group
-                  max.cells.per.ident = 1000)    # at most 1,000 cells per group, for speed
+                  min.pct = 0.05)                # genes detected in >= 5% of either group
 
 # Gene names as a column
 de$gene <- rownames(de)
@@ -562,7 +567,7 @@ ggplot(de, aes(avg_log2FC, -log10(p_val_adj + 1e-300), colour = hepatocyte_gene)
        colour = "Hepatocyte gene")
 ```
 
-`pct.1` is the % of inside T cells expressing the gene; `pct.2` the % of outside T cells.
+`pct.1` is the % of inside T cells expressing the gene; `pct.2` the % of outside T cells; Positive `avg_log2FC` values mean gene is upregulated in inside T cells compared to outside T cells. 
 
 ## 5b. GSEA
 
@@ -583,7 +588,7 @@ run_gsea <- function(de_table) {
   ranks <- sort(setNames(de_table$avg_log2FC, de_table$gene), decreasing = TRUE)  # ranked genes
   set.seed(1)                                                                     # repeatable permutations
   res <- as.data.frame(fgsea(pathways, ranks, minSize = 15, maxSize = 500))       # run GSEA
-  res[order(res$padj), c("pathway", "NES", "padj", "size")]                       # most significant first
+  res[order(res$padj),]                       # most significant first
 }
 
 # GSEA with all genes, then without the flagged hepatocyte genes

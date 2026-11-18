@@ -1,0 +1,162 @@
+# BANKSY clustering on 16 µm bins
+
+Standard clustering groups bins by their own expression only. **BANKSY** (Building Aggregates with a Neighborhood Kernel and Spatial Yardstick) also uses the expression of each bin's neighbors. Two settings control it:
+
+- **`k_geom`**: how many nearest bins count as the neighborhood. With 16 µm bins, 15–30 is a reasonable range; larger values give larger, smoother regions.
+- **`lambda`** (0 to 1): how much weight the neighborhood gets. **0.2** gives cell-type-like clusters, **0.8** gives tissue *domains*: regions with a shared make-up, such as lobule zones, portal areas or immune aggregates.
+
+This section calls the Banksy package directly (not `SeuratWrappers::RunBanksy()`), so it works with Seurat 6. It starts from a 16 µm object that has already been filtered, normalized and given variable genes (`NormalizeData()` and `FindVariableFeatures()`), with the bin positions in `xy16`.
+
+```{r banksy-packages}
+# Packages
+library(Banksy)                 # BANKSY (Bioconductor; version 1.0 or later)
+library(SingleCellExperiment)   # the data container BANKSY works with
+library(Seurat)                 # to move results back into the Seurat object
+library(ggplot2)                # plotting
+library(patchwork)              # plots side by side
+
+# Check the version: older versions (0.x) use different function names
+packageVersion("Banksy")
+
+# Load Part 4 env
+list2env(readRDS("data/backup/after_part4.rds"), envir = .GlobalEnv)
+```
+
+## 1. Put the data into a SingleCellExperiment
+
+```{r banksy-input}
+# Log-normalized expression of the 2,000 variable genes (genes x bins)
+expr <- LayerData(obj16, assay = "Spatial.016um", layer = "data")[VariableFeatures(obj16), ]
+
+# Bin positions in pixels, in the same order as the bins (columns of expr)
+xy <- GetTissueCoordinates(obj16)               # one row per bin: x, y, cell
+rownames(xy) <- xy$cell                         # name rows by bin barcode
+xy <- xy[colnames(expr), c("x", "y")]           # match the order of expr
+
+# Build the SingleCellExperiment: expression plus x/y columns
+sce <- SingleCellExperiment(assays = list(normcounts = expr))   # expression
+sce$x <- xy$x                                                     # x position of each bin
+sce$y <- xy$y                                                     # y position of each bin
+
+# Quick check: genes x bins
+dim(sce)
+```
+
+## 2. Compute the neighborhood features
+
+```{r banksy-compute}
+# For each bin, average the expression of its k_geom nearest bins (Gaussian-weighted,
+# closer bins count more). This adds a "neighborhood" matrix next to the bin's own.
+sce <- computeBanksy(sce,
+                     assay_name  = "normcounts",   # which expression values to use
+                     coord_names = c("x", "y"),    # which columns hold the positions
+                     k_geom      = 30)             # neighborhood size, in bins
+```
+
+This step builds a dense matrix of genes × bins × 2. For 20,000–40,000 bins and 2,000 genes that is roughly 0.5–1 GB of memory. On a full section (60,000+ bins), crop first or use fewer genes.
+
+## 3. PCA and clustering at two lambda values
+
+```{r banksy-cluster}
+# PCA on the combined own + neighborhood matrix, once for each lambda
+sce <- runBanksyPCA(sce,
+                    lambda = c(0.2, 0.8),          # 0.2 = cell types, 0.8 = domains
+                    npcs   = 20,                   # number of principal components
+                    seed   = 1000)                 # repeatable result
+
+# UMAP from each PCA (optional; only needed for UMAP plots)
+sce <- runBanksyUMAP(sce, lambda = c(0.2, 0.8), npcs = 20)
+
+# Leiden clustering on each PCA
+sce <- clusterBanksy(sce,
+                     lambda      = c(0.2, 0.8),    # one clustering per lambda
+                     resolution  = 0.5,            # higher = more clusters
+                     k_neighbors = 50,             # neighbors in the clustering graph
+                     seed        = 1000)           # repeatable result
+
+# Renumber clusters so similar clusters share a number across the two lambdas
+sce <- connectClusters(sce)
+
+# save off
+saveRDS(sce, "/home/gdmillerlab/cnh008/cshl/data/min_data/precomputed/Spatial.016um_sce.rds")
+
+# The new cluster columns (named like "clust_M0_lam0.2_k50_res0.5")
+grep("^clust", names(colData(sce)), value = TRUE)
+```
+
+## 4. Bring the results back into Seurat
+
+```{r banksy-to-seurat}
+# Find the cluster column for each lambda
+col_ct  <- grep("lam0.2", names(colData(sce)), value = TRUE)    # lambda 0.2
+col_dom <- grep("lam0.8", names(colData(sce)), value = TRUE)    # lambda 0.8
+
+# Add them to the Seurat metadata (bins are in the same order)
+obj16$banksy_ct  <- factor(colData(sce)[[col_ct]])    # cell-type-like clusters
+obj16$banksy_dom <- factor(colData(sce)[[col_dom]])   # domains
+
+# Add the lambda 0.8 UMAP as a Seurat reduction, for DimPlot
+umap_dom <- reducedDim(sce, "UMAP_M0_lam0.8")                    # bins x 2 matrix
+rownames(umap_dom) <- colnames(obj16)                            # name rows by bin
+colnames(umap_dom) <- c("banksyumap_1", "banksyumap_2")          # column names Seurat expects
+obj16[["banksy_umap"]] <- CreateDimReducObject(embeddings = umap_dom,     # the coordinates
+                                               key = "banksyumap_",      # prefix for columns
+                                               assay = "Spatial.016um")  # linked assay
+
+# save off
+saveRDS(obj16, "/home/gdmillerlab/cnh008/cshl/data/min_data/precomputed/liver_16um_after_banksy.rds")
+
+# How many bins in each domain?
+table(obj16$banksy_dom)
+```
+
+## 5. Compare with standard clustering
+
+```{r banksy-plots, fig.width = 15, fig.height = 5}
+# Standard clusters, BANKSY lambda 0.2, BANKSY lambda 0.8, side by side on the tissue
+SpatialDimPlot(obj16, group.by = "clusters_16", pt.size.factor = 6, cols = colors) + ggtitle("Standard") |
+  SpatialDimPlot(obj16, group.by = "banksy_ct", pt.size.factor = 6, cols = colors)  + ggtitle("BANKSY, lambda 0.2") |
+  SpatialDimPlot(obj16, group.by = "banksy_dom", pt.size.factor = 6, cols = colors) + ggtitle("BANKSY, lambda 0.8")
+ggsave("/home/gdmillerlab/cnh008/cshl/data/min_data/precomputed/liver_16um_after_banksy.jpeg",
+       width = 18,
+       height = 5)
+```
+
+```{r banksy-domains-markers, fig.width = 12, fig.height = 5}
+# Domains on the BANKSY UMAP
+DimPlot(obj16, reduction = "banksy_umap", group.by = "banksy_dom", label = TRUE)
+
+# Which domain is which? Known liver and immune markers across the domains
+DotPlot(obj16, group.by = "banksy_dom",
+        features = c("CYP2E1", "GLUL", "HAL", "SDS",      # pericentral / periportal hepatocytes
+                     "KRT19", "COL1A1",                   # bile ducts / portal stroma
+                     "CD3E", "NKG7", "CCR7", "LAMP3",     # T, NK, T zone, mature DCs
+                     "MS4A1")) + RotatedAxis()            # B cells
+```
+
+**What you should see:** lambda 0.2 looks like standard clustering with less speckle. Lambda 0.8 gives larger, smoother regions: repeating lobule zones, portal areas, and compact immune domains that match the lymphoid aggregates.
+
+## 6. Optional: try other settings
+
+Re-clustering is fast; recomputing the neighborhood (`computeBanksy`) is the slow step. To try other resolutions without recomputing:
+
+```{r banksy-sweep, fig.width = 15, fig.height = 5}
+# Cluster the existing lambda 0.8 PCA at three resolutions
+sce <- clusterBanksy(sce, lambda = 0.8, resolution = c(0.3, 0.5, 0.8), seed = 1000)
+
+# Plot each one on the tissue
+res_cols <- grep("lam0.8.*res", names(colData(sce)), value = TRUE)          # one column per resolution
+plots <- lapply(res_cols, function(col) {
+  obj16[[col]] <- factor(colData(sce)[[col]])                               # add to metadata
+  SpatialDimPlot(obj16, group.by = col) + ggtitle(sub(".*_res", "resolution ", col)) + NoLegend()
+})
+wrap_plots(plots, nrow = 1)
+```
+
+To change `k_geom` (the neighborhood size), rerun from step 2.
+
+**Questions**
+
+1. How do the lambda 0.2 and 0.8 maps differ? When would you want each?
+2. Which lambda 0.8 domain contains the lymphoid aggregates? Does it match the bins called from the deconvolution?
+3. What happens to the domains if you double `k_geom`? Why?
